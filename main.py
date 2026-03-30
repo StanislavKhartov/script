@@ -3,104 +3,151 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import random
+import re
 from supabase import create_client, Client
 
-SUPABASE_URL =  os.environ.get("SUPABASE_URL")
-SUPABASE_KEY =  os.environ.get("SUPABASE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Необходимо установить SUPABASE_URL и SUPABASE_KEY в секретах GitHub!")
+# --- НАСТРОЙКИ (Берутся из Secrets GitHub) ---
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-def get_existing_urls():
-    """Получает список всех URL из базы, чтобы не добавлять дубликаты"""
-    try:
-        # Запрашиваем только колонку url
-        response = supabase.table("ads").select("url").execute()
-        return {item['url'] for item in response.data}
-    except Exception as e:
-        print(f"Ошибка при получении данных из БД: {e}")
-        return set()
 
-def scrape_to_supabase(max_pages=5):
+FUNNY_PHRASES = [
+    "🕵️‍♂️ Пссс, парень, хату нннада? Тут нашлось выгодное предложение!",
+    "🔥 Опа! Кажется, кто-то выставил сочную хату! Беги смотреть, пока не увели!",
+    "🚀 Бро, бросай всё! Мои датчики зафиксировали аномально дешевое жилье!",
+    "👀 Глянь, че нашел! Похоже, это тот самый 'бабушатник' твоей мечты (или нет)!",
+    "💎 Нашел настоящий алмаз в куче объявлений! Срочно чекай:",
+    "⚡️ ВНИМАНИЕ! Детектор выгодных цен сработал! Кто-то явно ошибся кнопкой при вводе цены!"
+]
+
+def sync_users():
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+        response = requests.get(url, timeout=10).json()
+        if response.get("ok"):
+            for update in response.get("result", []):
+                if "message" in update:
+                    chat_id = str(update["message"]["chat"]["id"])
+                    text = update.get("message", {}).get("text", "")
+                    if text == "/start":
+                        supabase.table("users").upsert({"chat_id": chat_id}).execute()
+    except Exception as e:
+        print(f"Ошибка синхронизации пользователей: {e}")
+
+def get_all_subscribers():
+    try:
+        response = supabase.table("users").select("chat_id").execute()
+        return [item['chat_id'] for item in response.data]
+    except Exception as e:
+        print(f"Ошибка получения подписчиков: {e}")
+        return []
+
+def send_telegram_notifications(ad):
+    subscribers = get_all_subscribers()
+    if not subscribers: return
+    intro = random.choice(FUNNY_PHRASES)
+    message = (
+        f"{intro}\n\n"
+        f"⭐ *Рейтинг выгоды: {ad['interest']}/5*\n"
+        f"───────────────────\n"
+        f"💰 *Цена:* {ad['price']}\n"
+        f"🏠 *Комнат:* {ad['rooms']}\n"
+        f"📍 *Адрес:* {ad['address']}\n"
+        f"───────────────────\n\n"
+        f"🔗 [СКОРЕЕ ЖМИ СЮДА, ПОКА НЕ ЗАБРАЛИ]({ad['url']})"
+    )
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    for chat_id in subscribers:
+        try:
+            requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": False}, timeout=10)
+        except: pass
+
+def calculate_interest(price_str, rooms_str):
+    try:
+        if "договорная" in price_str.lower(): return 1
+        price_numeric = re.sub(r'[^\d]', '', price_str)
+        if not price_numeric: return 1
+        price = float(price_numeric)
+        if "студ" in rooms_str.lower():
+            rooms = 1
+        else:
+            rooms_match = re.search(r'\d+', rooms_str)
+            rooms = int(rooms_match.group()) if rooms_match else 1
+        if rooms == 0: rooms = 1
+        ratio = price / rooms
+        if ratio <= 200: return 5
+        if ratio <= 300: return 4
+        if ratio <= 400: return 3
+        if ratio <= 500: return 2
+        return 1
+    except: return 1
+
+def run_parser():
+    sync_users()
     base_url = "https://re.kufar.by"
     current_url = "https://re.kufar.by/l/minsk/snyat/kvartiru?cur=BYR"
-
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-
-    # 1. Получаем список того, что уже есть в базе
-    existing_urls = get_existing_urls()
-    print(f"В базе уже есть {len(existing_urls)} объявлений.")
+    
+    # В GitHub Actions мы всегда сканируем по 5 страниц (как обычный запуск)
+    page_limit = 5
+    
+    try:
+        response = supabase.table("ads").select("url").execute()
+        existing_urls = {item['url'] for item in response.data}
+    except: existing_urls = set()
 
     new_ads_to_insert = []
-    seen_locally = set() # Чтобы не дублировать внутри одного запуска
+    seen_locally = set()
 
-    for page_num in range(1, max_pages + 1):
-        print(f"Сканируем страницу {page_num}...")
+    for page_num in range(1, page_limit + 1):
+        print(f"Сканирую страницу {page_num}...")
         try:
             response = requests.get(current_url, headers=headers, timeout=10)
             soup = BeautifulSoup(response.text, 'html.parser')
             listings = soup.find_all('section')
 
-            print(response.status_code)
-
-            added_on_page = 0
             for ad in listings:
                 link_tag = ad.find('a', href=True)
                 url = link_tag['href'].split('?')[0] if link_tag else ""
                 if url.startswith('/'): url = base_url + url
+                if not url or url in existing_urls or url in seen_locally: continue
 
-                # ПРОВЕРКА: Если ссылка пустая, уже есть в БД или уже найдена на этой странице - пропускаем
-                if not url or url in existing_urls or url in seen_locally:
-                    continue
-
-                # Собираем данные
                 price_tag = ad.find('span', class_=lambda x: x and 'price__byr' in x)
-                price = price_tag.text.replace('\xa0', ' ').strip() if price_tag else "Договорная"
-
+                price_raw = price_tag.text.replace('\xa0', ' ').strip() if price_tag else "Договорная"
                 params_tag = ad.find('div', class_=lambda x: x and 'parameters' in x)
-                rooms = params_tag.text.split(',')[0].strip() if params_tag else "Не указано"
-
+                rooms_raw = params_tag.text.split(',')[0].strip() if params_tag else "1 комн."
                 address_tag = ad.find('span', class_=lambda x: x and 'address' in x)
-                address = address_tag.text.strip() if address_tag else "Нет адреса"
+                address = address_tag.text.strip() if address_tag else "Минск"
 
-                # Добавляем в список для вставки
-                new_ads_to_insert.append({
-                    "rooms": rooms,
-                    "price": price,
-                    "address": address,
-                    "url": url,
-                    "interest": 1,   # Значение по умолчанию
-                    "comment": ""    # Пустое поле
-                })
+                interest_level = calculate_interest(price_raw, rooms_raw)
+                ad_data = {"rooms": rooms_raw, "price": price_raw, "address": address, "url": url, "interest": interest_level, "comment": f"Авто-оценка: {interest_level}"}
 
+                if interest_level >= 3:
+                    print(f"🎯 Найдено выгодное предложение ({interest_level}*)! Рассылаю...")
+                    send_telegram_notifications(ad_data)
+
+                new_ads_to_insert.append(ad_data)
                 seen_locally.add(url)
-                added_on_page += 1
 
-            print(f"Найдено новых на странице: {added_on_page}")
-
-            # Ищем ссылку на следующую страницу
             next_link = soup.find('a', {'data-testid': 'realty-pagination-next-link'})
             if next_link:
                 current_url = base_url + next_link['href']
-                time.sleep(random.uniform(1.5, 3))
-            else:
-                break
-
+                time.sleep(random.uniform(1, 2))
+            else: break
         except Exception as e:
-            print(f"Ошибка при парсинге страницы {page_num}: {e}")
+            print(f"Ошибка парсинга: {e}")
             break
 
-    # 2. Отправляем всё новое в Supabase одним батчем (пачкой)
     if new_ads_to_insert:
-        print(f"\nОтправка {len(new_ads_to_insert)} новых записей в базу...")
         try:
-            result = supabase.table("ads").insert(new_ads_to_insert).execute()
-            print("Успешно! База обновлена.")
-        except Exception as e:
-            print(f"Ошибка при вставке в БД: {e}")
+            supabase.table("ads").insert(new_ads_to_insert).execute()
+            print(f"✅ Добавлено новых: {len(new_ads_to_insert)}")
+        except Exception as e: 
+            print(f"Ошибка записи в базу: {e}")
     else:
-        print("\nНовых объявлений не найдено. База в актуальном состоянии.")
+        print("Ничего нового не найдено.")
 
-# ЗАПУСК: укажите сколько страниц проверять
-scrape_to_supabase(max_pages=11)
+if __name__ == "__main__":
+    run_parser()
