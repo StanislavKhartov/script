@@ -6,7 +6,7 @@ import random
 import re
 from supabase import create_client, Client
 
-# --- НАСТРОЙКИ (Берутся из Secrets GitHub) ---
+# --- НАСТРОЙКИ ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -48,11 +48,17 @@ def send_telegram_notifications(ad):
     subscribers = get_all_subscribers()
     if not subscribers: return
     intro = random.choice(FUNNY_PHRASES)
+    
+    # Формируем цену (отображаем рубли и доллары для удобства)
+    price_display = f"{ad['price']}"
+    if ad.get('price_usd'):
+        price_display += f" (~{ad['price_usd']})"
+
     message = (
         f"{intro}\n\n"
         f"⭐ *Рейтинг выгоды: {ad['interest']}/5*\n"
         f"───────────────────\n"
-        f"💰 *Цена:* {ad['price']}\n"
+        f"💰 *Цена:* {price_display}\n"
         f"🏠 *Комнат:* {ad['rooms']}\n"
         f"📍 *Адрес:* {ad['address']}\n"
         f"───────────────────\n\n"
@@ -65,24 +71,35 @@ def send_telegram_notifications(ad):
         except: pass
 
 def calculate_interest(price_str, rooms_str):
+    """РАСЧЕТ СТРОГО ПО РУБЛЯМ (BYN)"""
     try:
         if "договорная" in price_str.lower(): return 1
-        price_numeric = re.sub(r'[^\d]', '', price_str)
-        if not price_numeric: return 1
-        price = float(price_numeric)
+        
+        p = price_str.replace('\xa0', '').replace(' ', '').replace(',', '.')
+        
+        match = re.search(r'(\d+\.?\d*)', p)
+        if not match: return 1
+        
+        price = float(match.group(1))
+
+        # 3. Количество комнат
         if "студ" in rooms_str.lower():
             rooms = 1
         else:
             rooms_match = re.search(r'\d+', rooms_str)
             rooms = int(rooms_match.group()) if rooms_match else 1
-        if rooms == 0: rooms = 1
+        
+        if rooms <= 0: rooms = 1
+        
+        # 4. РАСЧЕТ ВЫГОДЫ (Цена за одну комнату в BYN)
         ratio = price / rooms
         if ratio <= 200: return 5
         if ratio <= 300: return 4
         if ratio <= 400: return 3
         if ratio <= 500: return 2
         return 1
-    except: return 1
+    except: 
+        return 1
 
 def run_parser():
     sync_users()
@@ -90,7 +107,6 @@ def run_parser():
     current_url = "https://re.kufar.by/l/minsk/snyat/kvartiru?cur=BYR"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     
-    # В GitHub Actions мы всегда сканируем по 5 страниц (как обычный запуск)
     page_limit = 5
     
     try:
@@ -104,7 +120,7 @@ def run_parser():
     for page_num in range(1, page_limit + 1):
         print(f"Сканирую страницу {page_num}...")
         try:
-            response = requests.get(current_url, headers=headers, timeout=10)
+            response = requests.get(current_url, headers=headers, timeout=15)
             soup = BeautifulSoup(response.text, 'html.parser')
             listings = soup.find_all('section')
 
@@ -114,18 +130,39 @@ def run_parser():
                 if url.startswith('/'): url = base_url + url
                 if not url or url in existing_urls or url in seen_locally: continue
 
+                # Находим цену в BYN
                 price_tag = ad.find('span', class_=lambda x: x and 'price__byr' in x)
-                price_raw = price_tag.text.replace('\xa0', ' ').strip() if price_tag else "Договорная"
+                # Находим цену в USD (только для информации в Telegram)
+                price_usd_tag = ad.find('span', class_=lambda x: x and 'price__usd' in x)
+                
+                price_raw = price_tag.get_text(strip=True).replace('\xa0', ' ') if price_tag else "Договорная"
+                price_usd = ""
+                if price_usd_tag:
+                    price_usd = price_usd_tag.get_text(strip=True).replace('\xa0', ' ').replace('*', '').strip()
+
+                # Параметры комнат
                 params_tag = ad.find('div', class_=lambda x: x and 'parameters' in x)
                 rooms_raw = params_tag.text.split(',')[0].strip() if params_tag else "1 комн."
+                
+                # Адрес
                 address_tag = ad.find('span', class_=lambda x: x and 'address' in x)
                 address = address_tag.text.strip() if address_tag else "Минск"
 
+                # РАСЧЕТ ИНТЕРЕСА СТРОГО ПО BYN (price_raw)
                 interest_level = calculate_interest(price_raw, rooms_raw)
-                ad_data = {"rooms": rooms_raw, "price": price_raw, "address": address, "url": url, "interest": interest_level, "comment": f"Авто-оценка: {interest_level}"}
+                
+                ad_data = {
+                    "rooms": rooms_raw, 
+                    "price": price_raw, 
+                    "price_usd": price_usd,
+                    "address": address, 
+                    "url": url, 
+                    "interest": interest_level, 
+                    "comment": f"Авто-оценка: {interest_level}"
+                }
 
                 if interest_level >= 3:
-                    print(f"🎯 Найдено выгодное предложение ({interest_level}*)! Рассылаю...")
+                    print(f"🎯 Выгодное объявление ({interest_level}*)! Маякую в ТГ...")
                     send_telegram_notifications(ad_data)
 
                 new_ads_to_insert.append(ad_data)
@@ -137,7 +174,7 @@ def run_parser():
                 time.sleep(random.uniform(1, 2))
             else: break
         except Exception as e:
-            print(f"Ошибка парсинга: {e}")
+            print(f"Ошибка: {e}")
             break
 
     if new_ads_to_insert:
@@ -145,9 +182,9 @@ def run_parser():
             supabase.table("ads").insert(new_ads_to_insert).execute()
             print(f"✅ Добавлено новых: {len(new_ads_to_insert)}")
         except Exception as e: 
-            print(f"Ошибка записи в базу: {e}")
+            print(f"Ошибка записи: {e}")
     else:
-        print("Ничего нового не найдено.")
+        print("Нового ничего нет.")
 
 if __name__ == "__main__":
     run_parser()
