@@ -36,11 +36,6 @@ def sync_users():
                     if text == "/start":
                         # При старте создаем пользователя
                         supabase.table("users").upsert({"chat_id": chat_id, "rooms_filter": "all"}).execute()
-                        # Инструкция (оставляем только один раз при старте)
-                        msg = "Привет! Выбери, какие квартиры присылать:\n/1 - 1-комн.\n/2 - 2-комн.\n/3 - 3-комн.\n/all - Все"
-                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                                      json={"chat_id": chat_id, "text": msg})
-                    
                     elif text in ["/1", "/2", "/3", "/all"]:
                         # Просто обновляем базу данных без ответа пользователю
                         filter_val = text.replace("/", "")
