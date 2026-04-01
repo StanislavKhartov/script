@@ -106,7 +106,7 @@ def run_parser():
     current_url = "https://re.kufar.by/l/minsk/snyat/kvartiru?cur=BYR"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     
-    page_limit = 20
+    page_limit = 10
     
     try:
         response = supabase.table("ads").select("url").execute()
