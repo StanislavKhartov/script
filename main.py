@@ -23,7 +23,7 @@ FUNNY_PHRASES = [
 ]
 
 def sync_users():
-    """Синхронизация пользователей и их фильтров комнат"""
+    """Синхронизация пользователей и их фильтров (без ответных сообщений)"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
         response = requests.get(url, timeout=10).json()
@@ -34,31 +34,27 @@ def sync_users():
                     text = update.get("message", {}).get("text", "")
                     
                     if text == "/start":
-                        # При старте создаем пользователя с фильтром 'all'
+                        # При старте создаем пользователя
                         supabase.table("users").upsert({"chat_id": chat_id, "rooms_filter": "all"}).execute()
-                        # Инструкция пользователю
-                        msg = "Привет! Выбери, какие квартиры присылать:\n/1 - 1-комн.\n/2 - 2-комн.\n/3 - 3-комн.\n/all - Все (по умолчанию)"
+                        # Инструкция (оставляем только один раз при старте)
+                        msg = "Привет! Выбери, какие квартиры присылать:\n/1 - 1-комн.\n/2 - 2-комн.\n/3 - 3-комн.\n/all - Все"
                         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                                       json={"chat_id": chat_id, "text": msg})
                     
                     elif text in ["/1", "/2", "/3", "/all"]:
+                        # Просто обновляем базу данных без ответа пользователю
                         filter_val = text.replace("/", "")
                         supabase.table("users").update({"rooms_filter": filter_val}).eq("chat_id", chat_id).execute()
-                        confirm = f"✅ Ок! Теперь присылаю только: {filter_val if filter_val != 'all' else 'все объявления'}"
-                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                                      json={"chat_id": chat_id, "text": confirm})
     except Exception as e:
         print(f"Ошибка синхронизации пользователей: {e}")
 
 def send_telegram_notifications(ad):
-    """Отправка уведомлений только тем, чей фильтр совпадает с квартирой"""
-    # Определяем число комнат в объявлении для фильтрации
+    """Отправка уведомлений согласно фильтрам"""
     ad_rooms_digit = re.search(r'\d+', ad['rooms'])
     ad_rooms_val = ad_rooms_digit.group() if ad_rooms_digit else "1"
     if "студ" in ad['rooms'].lower(): ad_rooms_val = "1"
 
     try:
-        # Выбираем только тех, кому подходит данная квартира (фильтр 'all' или совпадение числа комнат)
         response = supabase.table("users").select("chat_id").or_(f"rooms_filter.eq.all,rooms_filter.eq.{ad_rooms_val}").execute()
         subscribers = [item['chat_id'] for item in response.data]
     except Exception as e:
@@ -89,7 +85,6 @@ def send_telegram_notifications(ad):
         except: pass
 
 def calculate_interest(price_str, rooms_str):
-    """РАСЧЕТ СТРОГО ПО РУБЛЯМ (BYN) - БЕЗ ИЗМЕНЕНИЙ"""
     try:
         if "договорная" in price_str.lower(): return 1
         p = price_str.replace('\xa0', '').replace(' ', '').replace(',', '.')
@@ -108,8 +103,7 @@ def calculate_interest(price_str, rooms_str):
         if ratio <= 400: return 3
         if ratio <= 500: return 2
         return 1
-    except: 
-        return 1
+    except: return 1
 
 def run_parser():
     sync_users()
@@ -117,7 +111,7 @@ def run_parser():
     current_url = "https://re.kufar.by/l/minsk/snyat/kvartiru?cur=BYR"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     
-    page_limit = 5
+    page_limit = 20
     
     try:
         response = supabase.table("ads").select("url").execute()
