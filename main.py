@@ -23,6 +23,7 @@ FUNNY_PHRASES = [
 ]
 
 def sync_users():
+    """Синхронизация пользователей и их фильтров комнат"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
         response = requests.get(url, timeout=10).json()
@@ -31,25 +32,42 @@ def sync_users():
                 if "message" in update:
                     chat_id = str(update["message"]["chat"]["id"])
                     text = update.get("message", {}).get("text", "")
+                    
                     if text == "/start":
-                        supabase.table("users").upsert({"chat_id": chat_id}).execute()
+                        # При старте создаем пользователя с фильтром 'all'
+                        supabase.table("users").upsert({"chat_id": chat_id, "rooms_filter": "all"}).execute()
+                        # Инструкция пользователю
+                        msg = "Привет! Выбери, какие квартиры присылать:\n/1 - 1-комн.\n/2 - 2-комн.\n/3 - 3-комн.\n/all - Все (по умолчанию)"
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                                      json={"chat_id": chat_id, "text": msg})
+                    
+                    elif text in ["/1", "/2", "/3", "/all"]:
+                        filter_val = text.replace("/", "")
+                        supabase.table("users").update({"rooms_filter": filter_val}).eq("chat_id", chat_id).execute()
+                        confirm = f"✅ Ок! Теперь присылаю только: {filter_val if filter_val != 'all' else 'все объявления'}"
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
+                                      json={"chat_id": chat_id, "text": confirm})
     except Exception as e:
         print(f"Ошибка синхронизации пользователей: {e}")
 
-def get_all_subscribers():
-    try:
-        response = supabase.table("users").select("chat_id").execute()
-        return [item['chat_id'] for item in response.data]
-    except Exception as e:
-        print(f"Ошибка получения подписчиков: {e}")
-        return []
-
 def send_telegram_notifications(ad):
-    subscribers = get_all_subscribers()
+    """Отправка уведомлений только тем, чей фильтр совпадает с квартирой"""
+    # Определяем число комнат в объявлении для фильтрации
+    ad_rooms_digit = re.search(r'\d+', ad['rooms'])
+    ad_rooms_val = ad_rooms_digit.group() if ad_rooms_digit else "1"
+    if "студ" in ad['rooms'].lower(): ad_rooms_val = "1"
+
+    try:
+        # Выбираем только тех, кому подходит данная квартира (фильтр 'all' или совпадение числа комнат)
+        response = supabase.table("users").select("chat_id").or_(f"rooms_filter.eq.all,rooms_filter.eq.{ad_rooms_val}").execute()
+        subscribers = [item['chat_id'] for item in response.data]
+    except Exception as e:
+        print(f"Ошибка фильтрации подписчиков: {e}")
+        return
+
     if not subscribers: return
     intro = random.choice(FUNNY_PHRASES)
     
-    # Формируем цену (отображаем рубли и доллары для удобства)
     price_display = f"{ad['price']}"
     if ad.get('price_usd'):
         price_display += f" (~{ad['price_usd']})"
@@ -71,27 +89,19 @@ def send_telegram_notifications(ad):
         except: pass
 
 def calculate_interest(price_str, rooms_str):
-    """РАСЧЕТ СТРОГО ПО РУБЛЯМ (BYN)"""
+    """РАСЧЕТ СТРОГО ПО РУБЛЯМ (BYN) - БЕЗ ИЗМЕНЕНИЙ"""
     try:
         if "договорная" in price_str.lower(): return 1
-        
         p = price_str.replace('\xa0', '').replace(' ', '').replace(',', '.')
-        
         match = re.search(r'(\d+\.?\d*)', p)
         if not match: return 1
-        
         price = float(match.group(1))
-
-        # 3. Количество комнат
         if "студ" in rooms_str.lower():
             rooms = 1
         else:
             rooms_match = re.search(r'\d+', rooms_str)
             rooms = int(rooms_match.group()) if rooms_match else 1
-        
         if rooms <= 0: rooms = 1
-        
-        # 4. РАСЧЕТ ВЫГОДЫ (Цена за одну комнату в BYN)
         ratio = price / rooms
         if ratio <= 200: return 5
         if ratio <= 300: return 4
@@ -130,9 +140,7 @@ def run_parser():
                 if url.startswith('/'): url = base_url + url
                 if not url or url in existing_urls or url in seen_locally: continue
 
-                # Находим цену в BYN
                 price_tag = ad.find('span', class_=lambda x: x and 'price__byr' in x)
-                # Находим цену в USD (только для информации в Telegram)
                 price_usd_tag = ad.find('span', class_=lambda x: x and 'price__usd' in x)
                 
                 price_raw = price_tag.get_text(strip=True).replace('\xa0', ' ') if price_tag else "Договорная"
@@ -140,15 +148,11 @@ def run_parser():
                 if price_usd_tag:
                     price_usd = price_usd_tag.get_text(strip=True).replace('\xa0', ' ').replace('*', '').strip()
 
-                # Параметры комнат
                 params_tag = ad.find('div', class_=lambda x: x and 'parameters' in x)
                 rooms_raw = params_tag.text.split(',')[0].strip() if params_tag else "1 комн."
-                
-                # Адрес
                 address_tag = ad.find('span', class_=lambda x: x and 'address' in x)
                 address = address_tag.text.strip() if address_tag else "Минск"
 
-                # РАСЧЕТ ИНТЕРЕСА СТРОГО ПО BYN (price_raw)
                 interest_level = calculate_interest(price_raw, rooms_raw)
                 
                 ad_data = {
