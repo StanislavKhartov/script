@@ -154,7 +154,7 @@ def run_parser():
                     "comment": f"Авто-оценка: {interest_level}"
                 }
 
-                if interest_level >= 3:
+                if interest_level >= 2:
                     print(f"🎯 Выгодное объявление ({interest_level}*)! Маякую в ТГ...")
                     send_telegram_notifications(ad_data)
 
