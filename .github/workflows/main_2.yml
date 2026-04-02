@@ -2,7 +2,7 @@ name: Kufar Monitor_2
 
 on:
   schedule:
-    - cron: '*/30 * * * *' 
+    - cron: '*/5 * * * *' 
   workflow_dispatch: # Позволяет запустить вручную кнопкой на сайте
 
 jobs:
