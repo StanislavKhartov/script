@@ -139,7 +139,7 @@ def run_parser():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     # Для GitHub Actions ставим фиксированную глубину (например, 5 страниц)
-    page_limit = 5 
+    page_limit = 15 
     
     try:
         res_ads = supabase.table("ads").select("url").execute()
