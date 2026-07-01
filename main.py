@@ -23,7 +23,6 @@ FUNNY_PHRASES = [
 ]
 
 def write_log(message):
-    """Замена логирования Tkinter на консольный вывод"""
     timestamp = time.strftime("%H:%M:%S")
     print(f"[{timestamp}] {message}")
 
@@ -138,7 +137,6 @@ def run_parser():
     current_url = "https://re.kufar.by/l/minsk/snyat/kvartiru?cur=BYR"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
-    # Для GitHub Actions ставим фиксированную глубину (например, 5 страниц)
     page_limit = 15 
     
     try:
