@@ -6,7 +6,6 @@ import random
 import re
 from supabase import create_client, Client
 
-# --- НАСТРОЙКИ (Берутся из GitHub Secrets) ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
